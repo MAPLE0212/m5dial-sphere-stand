@@ -94,3 +94,7 @@ curl -L -o reference/Dial.stl https://raw.githubusercontent.com/m5stack/M5_Hardw
 
 - 試し印刷はまだしていません。はめ合いは `FIT` で調整してください
 - M5Dial の 3D モデル（`reference/Dial.stl`）は M5Stack のものです（MIT License）。このリポジトリには含めていません
+
+## ライセンス
+
+[MIT License](LICENSE)。STL・スクリプトとも、改変・再配布・商用利用ができます。
