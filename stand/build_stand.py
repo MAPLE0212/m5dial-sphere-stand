@@ -8,7 +8,9 @@ Blender ヘッドレスで STL とプレビュー画像を生成する。
 単位: mm（Blender の 1 unit = 1 mm として STL 出力）
 
 ローカル座標（cap/body の設計座標）: +Z = ダイヤルの正面方向, +Y = 上, 球の中心 = 原点
-ワールド座標（出力）: -Y = 正面, +Z = 上
+球の座標 S: ローカルを X 軸まわり 90° 回したもの（-Y = 正面, +Z = 上）。球の底はこの座標で水平に切る
+ワールド座標（出力）: S を TILT だけ後ろへ傾けたもの。台座は机に垂直で、上面が斜め（くさび形）
+  → USB プラグは球に対して常に真下を向くので、傾けても球の内側に当たらない
 """
 import bpy, bmesh, math, os
 from mathutils import Vector, Matrix
@@ -35,9 +37,10 @@ SPIGOT_W = 2.0      # 差し込みリング肉厚
 RIM_W = 1.6         # 本体の縁の肉厚
 FIT = 0.15          # はめ合いクリアランス（片側）。きつければ 0.2〜0.25 に
 DFLAT = 2.5         # 回り止めの D カット量（上側）
-TILT = float(os.environ.get("TILT", 3.0))          # ダイヤルの上向き角度（°）
-BOTTOM_Z = float(os.environ.get("BOTTOM_Z", -37.0))  # 球の底を切る高さ（球の中心基準）。高いほど底の穴が広い
-BASE_H = float(os.environ.get("BASE_H", 30.0))      # 台座の高さ（ストレートUSB-Cの先でケーブルを曲げる余裕）
+TILT = float(os.environ.get("TILT", 15.0))         # 画面の上向き角度（°）。球ごと後ろへ傾ける
+BOTTOM_Z = float(os.environ.get("BOTTOM_Z", -37.0))  # 球の底を切る位置（球の座標で中心から）。高いほど底の穴が広い
+BEND_ROOM = float(os.environ.get("BEND_ROOM", 11.0))  # プラグの先から台座の底板までの余裕（ケーブルを曲げる）
+BASE_BACK_MIN = 8.0 # 台座の後ろ側の最低の高さ
 PLUG_LEN = 32.0     # USB-C プラグの長さ（根元のブーツ込み）
 PLUG_RELIEF = 1.5   # プラグ通路の逃げ（本体・台座の内側を削る量）
 RELIEF_FRONT = float(os.environ.get("RELIEF_FRONT", 1.2))  # プラグ前面側の逃げ
@@ -126,6 +129,50 @@ def join(objs):
 
 
 # ---------------- 部品 ----------------
+def s_to_world():
+    """球の座標 S → ワールド（TILT だけ後ろへ傾ける）"""
+    return Matrix.Rotation(math.radians(-TILT), 4, "X")
+
+
+def plane_cutter(below):
+    """球の底の平面（S で z = BOTTOM_Z）で切るためのカッター"""
+    c = box(-120, 120, -120, 120, -120, BOTTOM_Z) if below else box(-120, 120, -120, 120, BOTTOM_Z, 120)
+    c.matrix_world = s_to_world()
+    return apply_tf(c)
+
+
+def plane_cut(o, co, no):
+    """平面で切って、normal 側を捨て、切り口を面で閉じる（boolean より確実に閉じた形になる）"""
+    bm = bmesh.new(); bm.from_mesh(o.data)
+    r = bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+                               plane_co=co, plane_no=no, clear_outer=True)
+    edges = [e for e in r["geom_cut"] if isinstance(e, bmesh.types.BMEdge)]
+    bmesh.ops.triangle_fill(bm, use_beauty=True, use_dissolve=False, edges=edges)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(o.data); bm.free()
+    return o
+
+
+def ell_cyl(rx, ry, z0, z1, cx, cy):
+    o = cyl(rx, z0, z1)
+    o.scale = (1, ry / rx, 1)
+    o.location = (cx, cy, 0)
+    return apply_tf(o)
+
+
+def plug_zc():
+    return ZS + PANEL_T - (9.2 - DIAL_SHOULDER_Z)
+
+
+def base_table_z():
+    """台座の底（机の面）の高さ。プラグの先の下に BEND_ROOM を確保する"""
+    zc = plug_zc()
+    m = local_to_world()
+    low = min((m @ Vector((x, -22.5 - PLUG_LEN, z))).z for x in (-6.15, 6.15) for z in (zc - 3.25, zc + 3.25))
+    back_top = BOTTOM_Z * math.cos(math.radians(TILT)) - RB * math.sin(math.radians(TILT))
+    return min(low - BEND_ROOM - BASE_FLOOR, back_top - BASE_BACK_MIN)
+
+
 def make_cap():
     """前カバー: 取付穴のあるパネル + 本体に差し込むリング"""
     cap = sphere(R)
@@ -157,36 +204,49 @@ def make_body():
     hole = cyl(RC, ZS - SPIGOT_H - 0.3, ZS + 1)
     boolean(hole, box(-100, 100, RC - DFLAT, 100, -100, 100), "DIFFERENCE")
     boolean(body, hole, "DIFFERENCE")
+    # USB プラグの通り道（内側だけ削る）と底の平面カット。傾ける前のローカル座標で行う
+    # （ローカルでは球の底は y = BOTTOM_Z の平面）
+    boolean(body, make_plug_relief(local=True), "DIFFERENCE", "FAST")
+    plane_cut(body, (0, BOTTOM_Z, 0), (0, -1, 0))
     body.matrix_world = local_to_world()
     apply_tf(body)
-    # USB プラグの通り道（内側だけ削る）
-    boolean(body, make_plug_relief(), "DIFFERENCE", "FAST")
-    # 平面カットは FAST の方がきれいに閉じる（EXACT だと非多様体辺が出る）
-    boolean(body, box(-100, 100, -100, 100, -100, BOTTOM_Z), "DIFFERENCE", "FAST")
     body.name = "body"
     return body
 
 
 def make_base():
-    """台座: 円筒リング。上に位置決めの C 字リング、後ろにケーブル用の切り欠き"""
-    z1 = BOTTOM_Z
-    z0 = BOTTOM_Z - BASE_H
-    base = cyl(RB, z0, z1)
-    boolean(base, cyl(RB - BASE_WALL, z0 + BASE_FLOOR, z1 + 1), "DIFFERENCE")
-    # 球の底の開口に入る位置決めリング
-    loc = ring(RBI - FIT, RBI - FIT - 2.0, z1 - 0.5, z1 + 4.0)
-    # 前側 120° はUSBプラグの通り道として開ける（C字）
+    """台座: 机に垂直な楕円筒で、上面は球の底に合わせて斜め（くさび形）。
+    上板 + 位置決めの C 字リング、後ろにケーブル用の切り欠き"""
+    t = math.radians(TILT)
+    C = s_to_world() @ Vector((0, 0, BOTTOM_Z))   # 球の底の円の中心
+    table = base_table_z()
+    top = C.z + RB * math.sin(t) + 5
+    # 斜めの平面で切ったとき、ちょうど半径 RB の円になる楕円筒
+    base = ell_cyl(RB, RB * math.cos(t), table, top, C.x, C.y)
+    plane_cut(base, C, s_to_world().to_3x3() @ Vector((0, 0, 1)))
+    boolean(base, ell_cyl(RB - BASE_WALL, RB * math.cos(t) - BASE_WALL, table + BASE_FLOOR, top + 1, C.x, C.y),
+            "DIFFERENCE")
+    # 上板（下面は円すいにしてサポートなしで印刷できるように）と C 字リング。球の座標で作って傾ける
+    ri = RBI - FIT - 2.0
+    plate = cone(RB - 0.6, BOTTOM_Z - 7, RB - 0.6, BOTTOM_Z)
+    boolean(plate, cone(RB - 0.6, BOTTOM_Z - 7.01, ri, BOTTOM_Z + 0.01), "DIFFERENCE")
+    loc = ring(RBI - FIT, ri, BOTTOM_Z - 0.5, BOTTOM_Z + 4.0)
+    # 前側 120° は USB プラグの通り道として開ける（C 字）
     boolean(loc, box(-100, 100, -100, -RBI * 0.5, -100, 100), "DIFFERENCE")
-    boolean(base, loc, "UNION")
+    boolean(plate, loc, "UNION")
+    plate.matrix_world = s_to_world()
+    apply_tf(plate)
+    boolean(base, plate, "UNION")
     # 後ろのケーブル切り欠き（下から開いているので、ケーブルを上から落とし込める）
-    boolean(base, box(-3.0, 3.0, 0, 100, z0 - 1, z0 + BASE_FLOOR + 5), "DIFFERENCE")
+    boolean(base, box(-3.0, 3.0, C.y, 100, table - 1, table + BASE_FLOOR + 5), "DIFFERENCE")
     # 飾りの通気穴（写真の台座のイメージ）
+    hv = table + BASE_FLOOR + 4 + 0.5 * (C.z - RB * math.sin(t) - (table + BASE_FLOOR + 4))
     holes = []
     n = 36
     for i in range(n):
         a = 2 * math.pi * i / n
         bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=1.3, depth=10,
-                                            location=(math.cos(a) * RB, math.sin(a) * RB, z0 + BASE_H * 0.55),
+                                            location=(C.x + math.cos(a) * RB, C.y + math.sin(a) * RB * math.cos(t), hv),
                                             rotation=(0, math.pi / 2, a))
         holes.append(apply_tf(bpy.context.object))
     boolean(base, join(holes), "DIFFERENCE")
@@ -219,7 +279,7 @@ def import_dial():
 
 def make_plug(straight):
     """USB-C プラグの目安。ストレート: 12.3x6.5 長さ30。L字: 頭 13mm + 後ろへ伸びるケーブル Ø4.5"""
-    zc = ZS + PANEL_T - (9.2 - DIAL_SHOULDER_Z)
+    zc = plug_zc()
     if straight:
         p = box(-6.15, 6.15, -22.5 - PLUG_LEN, -22.5, zc - 3.25, zc + 3.25)
     else:
@@ -234,12 +294,14 @@ def make_plug(straight):
     return p
 
 
-def make_plug_relief(front=None):
+def make_plug_relief(front=None, local=False):
     """プラグの通り道を本体・台座の内側から逃がすカッター（外側の見た目は変わらない）"""
-    zc = ZS + PANEL_T - (9.2 - DIAL_SHOULDER_Z)
+    zc = plug_zc()
     e = PLUG_RELIEF
     f = RELIEF_FRONT if front is None else front
-    c = box(-6.15 - e, 6.15 + e, -22.5 - PLUG_LEN - 15, -30.0, zc - 3.25 - e, zc + 3.25 + f)
+    c = box(-6.15 - e, 6.15 + e, -22.5 - PLUG_LEN - 3, -30.0, zc - 3.25 - e, zc + 3.25 + f)  # 底板は貫通させない
+    if local:
+        return c
     c.matrix_world = local_to_world()
     return apply_tf(c)
 
@@ -314,9 +376,10 @@ def main():
     cap = make_cap()
     cap.matrix_world = local_to_world()
     apply_tf(cap)
-    # 前カバーの下端が底面より下に出る場合は、本体と同じ高さで平らに切る
-    if min(v.co.z for v in cap.data.vertices) < BOTTOM_Z:
-        boolean(cap, box(-100, 100, -100, 100, -100, BOTTOM_Z), "DIFFERENCE", "FAST")
+    # 前カバーの下端が底面より下に出る場合は、本体と同じ面で平らに切る
+    s_inv = s_to_world().inverted()
+    if min((s_inv @ v.co).z for v in cap.data.vertices) < BOTTOM_Z:
+        boolean(cap, plane_cutter(True), "DIFFERENCE", "FAST")
     cap_local = dup(cap, "cap_print")      # 印刷向き用
     cap_local.matrix_world = local_to_world().inverted()
     apply_tf(cap_local)
@@ -331,8 +394,30 @@ def main():
     objs = {o.name: o for o in (cap, body, base, dial, plug, plug_s)}
     inv = local_to_world().inverted()
     zmin = min((v.co.z for v in plug.data.vertices))
-    print(f"PLUG straight end z={zmin:.1f}  base floor top z={BOTTOM_Z - BASE_H + BASE_FLOOR:.1f}"
-          f"  room for cable bend={zmin - (BOTTOM_Z - BASE_H + BASE_FLOOR):.1f} mm")
+    table = base_table_z()
+    C = s_to_world() @ Vector((0, 0, BOTTOM_Z))
+    t = math.radians(TILT)
+    print(f"BASE table z={table:.1f}  height back={C.z - RB * math.sin(t) - table:.1f} front={C.z + RB * math.sin(t) - table:.1f}"
+          f"  center offset (forward of sphere center)={-C.y:.1f} mm  total height={R - table:.1f} mm")
+    print(f"PLUG straight end z={zmin:.1f}  room for cable bend={zmin - (table + BASE_FLOOR):.1f} mm")
+    # プラグ周りのすき間（最小距離）
+    zc = plug_zc()
+    M = local_to_world()
+    for W, H, label in [(12.3, 6.5, "12.3x6.5"), (14.0, 7.0, "14x7")]:
+        pts = []
+        n = 30
+        for i in range(n + 1):
+            for j in range(n + 1):
+                u = -W / 2 + W * i / n
+                v_ = -22.5 - PLUG_LEN * j / n
+                for w in (zc - H / 2, zc + H / 2):
+                    pts.append(M @ Vector((u, v_, w)))
+                for u2 in (-W / 2, W / 2):
+                    pts.append(M @ Vector((u2, v_, zc - H / 2 + H * i / n)))
+        for o in (cap, body, base):
+            tr = bvh(o)
+            d = min(tr.find_nearest(q)[3] for q in pts)
+            print(f"MARGIN plug {label} -> {o.name}: {d:.2f} mm")
     for a, b in [("M5Dial", "cap"), ("M5Dial", "body"), ("usb_straight", "cap"), ("usb_straight", "body"),
                  ("usb_straight", "base"), ("usb_L", "body"), ("usb_L", "base"),
                  ("cap", "body"), ("body", "base"), ("cap", "base")]:
@@ -366,10 +451,12 @@ def main():
     apply_tf(cap_local)
     export(cap_local, os.path.join(out, "m5dial_stand_1_cap.stl"))
     # 本体: 底面を下に
-    bp = dup(body, "body_print"); bp.location.z = -BOTTOM_Z; apply_tf(bp)
+    bp = dup(body, "body_print")
+    bp.matrix_world = Matrix.Translation((0, 0, -BOTTOM_Z)) @ s_to_world().inverted()
+    apply_tf(bp)
     export(bp, os.path.join(out, "m5dial_stand_2_body.stl"))
     # 台座: そのまま底面を下に
-    sp = dup(base, "base_print"); sp.location.z = -(BOTTOM_Z - BASE_H); apply_tf(sp)
+    sp = dup(base, "base_print"); sp.location.z = -base_table_z(); apply_tf(sp)
     export(sp, os.path.join(out, "m5dial_stand_3_base.stl"))
     for o in (cap_local, bp, sp):
         bpy.data.objects.remove(o, do_unlink=True)
