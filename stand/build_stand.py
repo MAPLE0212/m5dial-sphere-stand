@@ -3,7 +3,8 @@ M5Dial 球体スタンド（前後2分割・パネル挟み込み式）
 Blender ヘッドレスで STL とプレビュー画像を生成する。
 
 実行:
-  /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/build_stand.py
+  /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/build_stand.py              # Ø84 版
+  VARIANT=100 /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/build_stand.py  # Ø100 版
 
 単位: mm（Blender の 1 unit = 1 mm として STL 出力）
 
@@ -25,11 +26,23 @@ if not os.path.exists(DIAL_STL):
         "master/Products/K130_Dial/Structures/Dial.stl")
 
 # ---------------- パラメータ ----------------
-R = 50.0            # 球の外半径（直径100mm）
+# サイズ違いのプリセット。VARIANT=100 で Ø100 版（標準は Ø84 版）
+VARIANT = os.environ.get("VARIANT", "84")
+PRESETS = {
+    "84":  dict(R=42.0, FACE_R=31.0, BOTTOM_Z=-33.0, BEND_ROOM=9.0),
+    "100": dict(R=50.0, FACE_R=33.0, BOTTOM_Z=-37.0, BEND_ROOM=11.0),
+}
+if VARIANT not in PRESETS:
+    raise SystemExit(f"VARIANT は {list(PRESETS)} のどれか（指定: {VARIANT}）")
+_P = PRESETS[VARIANT]
+OUT_DIR = os.path.join(HERE, "d" + VARIANT)                 # STL の出力先
+PREV_DIR = os.path.join(HERE, "preview", "d" + VARIANT)     # プレビュー画像の出力先
+
+R = float(os.environ.get("R", _P["R"]))            # 球の外半径（Ø84 版 42 / Ø100 版 50）
 T = 2.6             # 球殻の厚み
-FACE_R = 33.0       # 正面の平らな面の半径
+FACE_R = float(os.environ.get("FACE_R", _P["FACE_R"]))     # 正面の平らな面の半径
 PANEL_T = 3.0       # M5Dial が挟むパネル厚（付属ナットで締める。STL実測: 標準隙間1.8mm、ねじは後ろへ約7mm続く）
-RECESS = 3.6        # ダイヤル周りのすり鉢状のくぼみ深さ（45°）
+RECESS = 3.0        # ダイヤル周りのすり鉢状のくぼみ深さ（45°）
 HOLE_D = 45.4       # 取付穴径（公式 45mm + 印刷公差）
 KNOB_CLR_R = 26.0   # くぼみ底の半径（ノブ Ø49.6 + 隙間）
 SPIGOT_H = 4.0      # 前カバーの差し込みリング長さ（USBプラグに当たらない長さ）
@@ -38,14 +51,18 @@ RIM_W = 1.6         # 本体の縁の肉厚
 FIT = 0.15          # はめ合いクリアランス（片側）。きつければ 0.2〜0.25 に
 DFLAT = 2.5         # 回り止めの D カット量（上側）
 TILT = float(os.environ.get("TILT", 15.0))         # 画面の上向き角度（°）。球ごと後ろへ傾ける
-BOTTOM_Z = float(os.environ.get("BOTTOM_Z", -37.0))  # 球の底を切る位置（球の座標で中心から）。高いほど底の穴が広い
-BEND_ROOM = float(os.environ.get("BEND_ROOM", 11.0))  # プラグの先から台座の底板までの余裕（ケーブルを曲げる）
+BOTTOM_Z = float(os.environ.get("BOTTOM_Z", _P["BOTTOM_Z"]))  # 球の底を切る位置（球の座標で中心から）。高いほど底の穴が広い
+BEND_ROOM = float(os.environ.get("BEND_ROOM", _P["BEND_ROOM"]))  # プラグの先から台座の底板までの余裕（ケーブルを曲げる）
 BASE_BACK_MIN = 8.0 # 台座の後ろ側の最低の高さ
-PLUG_LEN = 32.0     # USB-C プラグの長さ（根元のブーツ込み）
+PLUG_LEN = float(os.environ.get("PLUG_LEN", 32.0))  # USB-C プラグの長さ（根元のブーツ込み）。短いケーブルなら小さくすると台座が低くなる
 PLUG_RELIEF = 1.5   # プラグ通路の逃げ（本体・台座の内側を削る量）
 RELIEF_FRONT = float(os.environ.get("RELIEF_FRONT", 1.2))  # プラグ前面側の逃げ
 BASE_FLOOR = 2.0    # 台座の底板（中に重りを入れられる）
 BASE_WALL = 2.4     # 台座の肉厚
+FOOT_FLARE = 5.0    # 台座の裾の広がり（倒れにくくする）
+FOOT_H = 7.0        # 裾の高さ
+PLA_DENSITY = 1.24 * 0.85  # 重さの見積もり用（g/cm3、PLA × 充填の目安）
+DIAL_MASS = 46.3    # M5Dial の重さ（g、公式）
 SEG = 192           # 円の分割数
 
 ZF = math.sqrt(R**2 - FACE_R**2)          # 正面の平面
@@ -223,6 +240,12 @@ def make_base():
     top = C.z + RB * math.sin(t) + 5
     # 斜めの平面で切ったとき、ちょうど半径 RB の円になる楕円筒
     base = ell_cyl(RB, RB * math.cos(t), table, top, C.x, C.y)
+    # 裾広がりのフット（同じ楕円比の円すい台）
+    foot = cone(RB + FOOT_FLARE, table, RB, table + FOOT_H)
+    foot.scale = (1, math.cos(t), 1)
+    foot.location = (C.x, C.y, 0)
+    apply_tf(foot)
+    boolean(base, foot, "UNION")
     plane_cut(base, C, s_to_world().to_3x3() @ Vector((0, 0, 1)))
     boolean(base, ell_cyl(RB - BASE_WALL, RB * math.cos(t) - BASE_WALL, table + BASE_FLOOR, top + 1, C.x, C.y),
             "DIFFERENCE")
@@ -304,6 +327,50 @@ def make_plug_relief(front=None, local=False):
         return c
     c.matrix_world = local_to_world()
     return apply_tf(c)
+
+
+def mass_props(o, density):
+    """体積（cm3）と重心（ワールド）"""
+    bm = bmesh.new(); bm.from_mesh(o.data)
+    bmesh.ops.triangulate(bm, faces=bm.faces)
+    vol = 0.0
+    c = Vector()
+    for f in bm.faces:
+        a, b, d = (v.co for v in f.verts)
+        v6 = a.dot(b.cross(d))
+        vol += v6
+        c += v6 * (a + b + d)
+    bm.free()
+    vol /= 6.0
+    c = c / (24.0 * vol) if vol else c
+    return vol / 1000 * density, c
+
+
+def stability(cap, body, base, dial):
+    """画面の中心を正面から押したとき、後ろに倒れ始める力を見積もる"""
+    t = math.radians(TILT)
+    parts = [mass_props(o, PLA_DENSITY) for o in (cap, body, base)]
+    xs = [v.co for v in dial.data.vertices]
+    dc = sum(xs, Vector()) / len(xs)
+    parts.append((DIAL_MASS, dc))
+    M = sum(m for m, _ in parts)
+    G = sum((c * m for m, c in parts), Vector()) / M
+    C = s_to_world() @ Vector((0, 0, BOTTOM_Z))
+    table = base_table_z()
+    P = Vector((0, C.y + (RB + FOOT_FLARE) * math.cos(t), table))   # 後ろ側の接地点
+    zfront = ZS + PANEL_T + DIAL_SHOULDER_Z + 17.32
+    S = local_to_world() @ Vector((0, 0, zfront))
+    d = (local_to_world().to_3x3() @ Vector((0, 0, -1))).normalized()   # 画面に垂直に押す向き
+    res = []
+    for extra in (0.0, 150.0):
+        m = M + extra
+        g = (G * M + Vector((0, C.y, table + 5)) * extra) / m
+        tw = -(g.y - P.y) * m * 9.81e-3            # 重さが戻そうとするモーメント（N·mm）
+        tf = (S.y - P.y) * d.z - (S.z - P.z) * d.y  # 押す力 1N あたりの倒すモーメント
+        res.append((m, tw / -tf if tf < 0 else float("inf")))
+    print(f"STABILITY mass≈{res[0][0]:.0f} g, CG forward of base center {C.y - G.y:.1f} mm; "
+          f"tips backward at ≈{res[0][1]:.1f} N ({res[0][1] / 9.81 * 1000:.0f} gf); "
+          f"with +150 g weight: {res[1][1]:.1f} N ({res[1][1] / 9.81 * 1000:.0f} gf)")
 
 
 def bvh(o):
@@ -435,6 +502,7 @@ def main():
         bpy.data.objects.remove(t, do_unlink=True)
         print(f"INTERFERENCE {a} x {b}: overlap volume {v:.3f} mm3{where}")
     bpy.data.objects.remove(plug_s, do_unlink=True)
+    stability(cap, body, base, dial)
 
     for o in (cap, body, base, cap_local):
         me = o.data
@@ -445,19 +513,21 @@ def main():
         print(f"PART {o.name}: faces={len(me.polygons)} non_manifold_edges={nm} volume={vol/1000:.1f} cm3")
 
     # 印刷向きで出力
-    out = HERE
+    out = OUT_DIR
+    os.makedirs(out, exist_ok=True)
+    stem = f"m5dial_stand_d{VARIANT}"
     # 前カバー: 正面を下に
     cap_local.matrix_world = Matrix.Translation((0, 0, ZF)) @ Matrix.Rotation(math.pi, 4, "X")
     apply_tf(cap_local)
-    export(cap_local, os.path.join(out, "m5dial_stand_1_cap.stl"))
+    export(cap_local, os.path.join(out, f"{stem}_1_cap.stl"))
     # 本体: 底面を下に
     bp = dup(body, "body_print")
     bp.matrix_world = Matrix.Translation((0, 0, -BOTTOM_Z)) @ s_to_world().inverted()
     apply_tf(bp)
-    export(bp, os.path.join(out, "m5dial_stand_2_body.stl"))
+    export(bp, os.path.join(out, f"{stem}_2_body.stl"))
     # 台座: そのまま底面を下に
     sp = dup(base, "base_print"); sp.location.z = -base_table_z(); apply_tf(sp)
-    export(sp, os.path.join(out, "m5dial_stand_3_base.stl"))
+    export(sp, os.path.join(out, f"{stem}_3_base.stl"))
     for o in (cap_local, bp, sp):
         bpy.data.objects.remove(o, do_unlink=True)
 
@@ -469,7 +539,7 @@ def main():
     dial.data.materials.append(mat("dial", (0.95, 0.45, 0.12)))
     plug.data.materials.append(mat("plug", (0.2, 0.5, 0.95)))
     plug.hide_render = True
-    prev = os.path.join(out, "preview")
+    prev = PREV_DIR
     os.makedirs(prev, exist_ok=True)
 
     camera((-170, -260, 110), (0, 0, -8), 60)

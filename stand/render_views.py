@@ -2,7 +2,8 @@
 いろいろな角度のプレビュー画像を出力する（build_stand.py の形状をそのまま使う）。
 
 実行:
-  /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/render_views.py
+  /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/render_views.py              # Ø84 版
+  VARIANT=100 /Applications/Blender.app/Contents/MacOS/Blender -b -P stand/render_views.py  # Ø100 版
 """
 import os, math
 import bpy, bmesh
@@ -12,7 +13,7 @@ __file__ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build_stand
 _src = open(__file__, encoding="utf-8").read().replace("\nmain()\n", "\n")
 exec(compile(_src, __file__, "exec"))
 
-PREV = os.path.join(HERE, "preview")
+PREV = PREV_DIR
 os.makedirs(PREV, exist_ok=True)
 
 
@@ -64,6 +65,32 @@ def colorize(cap, body, base, dial, glass):
 def shot(name, loc, target, lens=55):
     camera(loc, target, lens)
     render(os.path.join(PREV, name))
+
+
+def rear_notch():
+    """台座の後ろの切り欠きと、ケーブルの通し方の目安"""
+    cap, body, base, dial, glass = build()
+    dial.hide_render = glass.hide_render = True
+    setup_render()
+    cap.data.materials.append(mat("a", (0.11, 0.11, 0.12)))
+    body.data.materials.append(mat("b", (0.16, 0.16, 0.17)))
+    base.data.materials.append(mat("c", (0.20, 0.20, 0.21)))
+    # ケーブル: プラグの先から台座の中で後ろへ曲げ、切り欠きを通って外へ
+    tip = local_to_world() @ Vector((0, -22.5 - PLUG_LEN, plug_zc()))
+    z0 = base_table_z() + BASE_FLOOR + 2.3
+    cy = (s_to_world() @ Vector((0, 0, BOTTOM_Z))).y
+    pts = [(0, tip.y, tip.z + 2), (0, (tip.y + cy) / 2, z0 + 3), (0, cy, z0), (0, cy + RB + 40, z0)]
+    cu = bpy.data.curves.new("cable", "CURVE")
+    cu.dimensions = "3D"; cu.bevel_depth = 2.2; cu.bevel_resolution = 4
+    sp = cu.splines.new("BEZIER"); sp.bezier_points.add(len(pts) - 1)
+    for bp, p in zip(sp.bezier_points, pts):
+        bp.co = p; bp.handle_left_type = bp.handle_right_type = "AUTO"
+    ob = bpy.data.objects.new("cable", cu)
+    bpy.context.collection.objects.link(ob)
+    ob.data.materials.append(mat("cab", (0.2, 0.5, 0.95)))
+    t = base_table_z()
+    shot("4_rear_cable_notch.png", (120, 240, t + 50), Vector((0, 0, t + 15)), 60)
+    bpy.data.objects.remove(ob, do_unlink=True)
 
 
 def main_views():
@@ -122,6 +149,7 @@ def print_layout(cap, body, base):
     shot("12_print_layout.png", (-40, -380, 300), Vector((0, 0, 15)), 38)
 
 
+rear_notch()
 cap, body, base = main_views()
 print_layout(cap, body, base)
 print("DONE")
